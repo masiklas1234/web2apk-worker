@@ -1,0 +1,2 @@
+-keep class com.kenzmd.web2apk.** { *; }
+-keepattributes *Annotation*
