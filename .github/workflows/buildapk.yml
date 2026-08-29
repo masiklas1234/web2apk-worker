@@ -1,0 +1,91 @@
+name: Build Genetic APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-genetic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Kotlin
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Pillow
+        run: pip install Pillow
+
+      - name: Copy Genetic Files to Root
+        run: |
+          # Salin semua file dari folder genetic/ ke root
+          if [ -d "genetic" ]; then
+            cp -r genetic/. .
+            echo "Files copied from genetic/ to root"
+            ls -la
+          else
+            echo "ERROR: Folder genetic tidak ditemukan"
+            exit 1
+          fi
+
+      - name: Generate Icons
+        run: |
+          if [ -f "generate_icons.py" ]; then
+            python3 generate_icons.py
+            echo "Icons generated OK"
+          else
+            echo "WARNING: generate_icons.py tidak ada, skip"
+          fi
+
+      - name: Setup Gradle Wrapper
+        run: |
+          mkdir -p android/gradle/wrapper
+          curl -L -o android/gradle/wrapper/gradle-wrapper.jar \
+            "https://github.com/gradle/gradle/raw/v8.4.0/gradle/wrapper/gradle-wrapper.jar"
+          chmod +x android/gradlew
+          echo "Gradle wrapper OK"
+
+      - name: Build Release APK
+        run: |
+          cd android
+          ./gradlew assembleRelease --no-daemon --stacktrace
+        env:
+          GRADLE_OPTS: "-Xmx2g"
+
+      - name: Sign APK
+        run: |
+          APK=$(find android/app/build/outputs/apk/release -name "*.apk" | head -1)
+          if [ -z "$APK" ]; then echo "ERROR: APK tidak ditemukan"; exit 1; fi
+          echo "APK: $APK"
+          keytool -genkey -v -keystore sign.keystore -alias key0 \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android123 -keypass android123 \
+            -dname "CN=KenzMD,O=Web2APK,C=MY" -noprompt 2>/dev/null || true
+          BTOOL=$ANDROID_SDK_ROOT/build-tools/$(ls $ANDROID_SDK_ROOT/build-tools | sort -V | tail -1)/apksigner
+          $BTOOL sign --ks sign.keystore --ks-key-alias key0 \
+            --ks-pass pass:android123 --key-pass pass:android123 \
+            --out GeneticAPK.apk "$APK"
+          echo "Sign OK"
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: genetic-apk-output
+          path: GeneticAPK.apk
+          retention-days: 3
