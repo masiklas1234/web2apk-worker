@@ -21,7 +21,7 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // ── 1. Fullscreen & hapus status bar sepenuhnya ────────
+        // ── 1. Fullscreen total — hapus status bar biru ────────────
         Window w = getWindow();
         w.requestFeature(Window.FEATURE_NO_TITLE);
         w.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
@@ -36,17 +36,17 @@ public class MainActivity extends AppCompatActivity {
         }
         if (getSupportActionBar() != null) getSupportActionBar().hide();
 
-        // ── 2. Background hitam sementara WebView loading ──────
+        // ── 2. Cegah flash putih — background hitam dulu ───────────
         w.getDecorView().setBackgroundColor(Color.BLACK);
 
         setContentView(R.layout.activity_main);
         webView = findViewById(R.id.webView);
 
-        // ── 3. WebView background transparent (hilang putih) ───
+        // ── 3. WebView background transparent ──────────────────────
         webView.setBackgroundColor(Color.TRANSPARENT);
         webView.getBackground().setAlpha(0);
 
-        // ── 4. WebView settings ────────────────────────────────
+        // ── 4. WebView settings ────────────────────────────────────
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
@@ -59,23 +59,22 @@ public class MainActivity extends AppCompatActivity {
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         s.setAllowFileAccess(false);
 
-        // ── 5. Hapus overscroll putih/glow ─────────────────────
+        // ── 5. Hapus overscroll putih ──────────────────────────────
         webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
         webView.setScrollBarStyle(View.SCROLLBARS_INSIDE_OVERLAY);
         webView.setVerticalScrollBarEnabled(false);
         webView.setHorizontalScrollBarEnabled(false);
 
-        // ── 6. WebViewClient ────────────────────────────────────
+        // ── 6. WebViewClient ────────────────────────────────────────
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
-                // Reset background ke transparent setelah page load
                 view.setBackgroundColor(Color.TRANSPARENT);
             }
         });
 
-        // ── 7. Load website ─────────────────────────────────────
+        // ── 7. Load website ─────────────────────────────────────────
         String url = getString(R.string.website_url);
         webView.loadUrl(url);
     }
