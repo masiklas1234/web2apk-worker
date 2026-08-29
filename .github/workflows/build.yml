@@ -11,8 +11,12 @@ on:
         description: 'Nama Aplikasi'
         required: true
         type: string
-      icon_base64:
-        description: 'Icon Base64'
+      icon_path:
+        description: 'Path icon di repo (e.g. _build_temp/icon_123.png)'
+        required: true
+        type: string
+      build_id:
+        description: 'Build ID unik'
         required: true
         type: string
 
@@ -39,21 +43,30 @@ jobs:
 
       - name: Process Icon
         run: |
+          ICON_SRC="${{ github.event.inputs.icon_path }}"
+          echo "Icon source: $ICON_SRC"
+          # Pastikan file icon ada
+          if [ ! -f "$ICON_SRC" ]; then
+            echo "ERROR: Icon file tidak ditemukan: $ICON_SRC"
+            exit 1
+          fi
+          # Buat semua folder mipmap
           mkdir -p android/app/src/main/res/mipmap-mdpi
           mkdir -p android/app/src/main/res/mipmap-hdpi
           mkdir -p android/app/src/main/res/mipmap-xhdpi
           mkdir -p android/app/src/main/res/mipmap-xxhdpi
           mkdir -p android/app/src/main/res/mipmap-xxxhdpi
-          echo "${{ github.event.inputs.icon_base64 }}" | base64 -d > icon_raw.png
-          convert icon_raw.png -resize 48x48   android/app/src/main/res/mipmap-mdpi/ic_launcher.png
-          convert icon_raw.png -resize 72x72   android/app/src/main/res/mipmap-hdpi/ic_launcher.png
-          convert icon_raw.png -resize 96x96   android/app/src/main/res/mipmap-xhdpi/ic_launcher.png
-          convert icon_raw.png -resize 144x144 android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
-          convert icon_raw.png -resize 192x192 android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+          # Resize ke semua densitas
+          convert "$ICON_SRC" -resize 48x48   android/app/src/main/res/mipmap-mdpi/ic_launcher.png
+          convert "$ICON_SRC" -resize 72x72   android/app/src/main/res/mipmap-hdpi/ic_launcher.png
+          convert "$ICON_SRC" -resize 96x96   android/app/src/main/res/mipmap-xhdpi/ic_launcher.png
+          convert "$ICON_SRC" -resize 144x144 android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
+          convert "$ICON_SRC" -resize 192x192 android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
           echo "Icon processed OK"
 
       - name: Inject App Name dan URL
         run: |
+          mkdir -p android/app/src/main/res/values
           cat > android/app/src/main/res/values/strings.xml << 'XMLEOF'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
@@ -74,7 +87,8 @@ jobs:
       - name: Sign APK
         run: |
           APK=$(find android/app/build/outputs/apk/release -name "*.apk" | head -1)
-          echo "APK found: $APK"
+          if [ -z "$APK" ]; then echo "ERROR: APK tidak ditemukan"; exit 1; fi
+          echo "APK: $APK"
           keytool -genkey -v -keystore sign.keystore -alias key0 \
             -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass android123 -keypass android123 \
@@ -90,7 +104,7 @@ jobs:
           SAFE=$(echo "${{ github.event.inputs.app_name }}" | sed 's/[^a-zA-Z0-9_-]/_/g')
           mv signed.apk "${SAFE}.apk"
           echo "APK_FILE=${SAFE}.apk" >> $GITHUB_ENV
-          echo "Renamed to ${SAFE}.apk"
+          echo "Renamed: ${SAFE}.apk"
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
