@@ -1,0 +1,112 @@
+name: Build NexPanel APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-nexapp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Project Files dari nexapp/
+        run: |
+          for item in nexapp/*; do
+            n=$(basename "$item")
+            cp -rf "$item" . 2>/dev/null || true
+          done
+          echo "Files copied OK"
+          ls -la
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.0'
+          channel: 'stable'
+          cache: true
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Fix local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+          FLUTTER_PATH=$(which flutter | xargs dirname | xargs dirname)
+          echo "flutter.sdk=$FLUTTER_PATH" >> android/local.properties
+          cat android/local.properties
+
+      - name: Download Gradle Wrapper JAR
+        run: |
+          mkdir -p android/gradle/wrapper
+          JAR="android/gradle/wrapper/gradle-wrapper.jar"
+          if [ ! -f "$JAR" ] || [ ! -s "$JAR" ]; then
+            curl -fsSL -o "$JAR" "https://github.com/gradle/gradle/raw/v8.4.0/gradle/wrapper/gradle-wrapper.jar"
+          fi
+          chmod +x android/gradlew
+
+      - name: Read App Name
+        run: |
+          APP_NAME=$(grep -oP '(?<=<string name="app_name">)[^<]+' android/app/src/main/res/values/strings.xml 2>/dev/null || echo "NEX_PANEL")
+          echo "App name: $APP_NAME"
+          echo "APP_NAME=$APP_NAME" >> $GITHUB_ENV
+          SAFE=$(echo "$APP_NAME" | sed 's/[^a-zA-Z0-9_-]/_/g')
+          echo "APK_SAFE=$SAFE" >> $GITHUB_ENV
+
+      - name: Enable R8 + shrinkResources
+        run: |
+          sed -i 's/minifyEnabled false/minifyEnabled true/' android/app/build.gradle
+          sed -i 's/shrinkResources false/shrinkResources true/' android/app/build.gradle
+          grep -E "minify|shrink" android/app/build.gradle
+
+      - name: Build Release APK (size optimized)
+        run: |
+          flutter build apk \
+            --release \
+            --target-platform android-arm,android-arm64 \
+            --split-per-abi \
+            --obfuscate \
+            --split-debug-info=debug-info/ \
+            --no-tree-shake-icons
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
+
+      - name: Pilih APK arm64
+        run: |
+          APK=$(find build/app/outputs/apk/release -name "*arm64*.apk" | head -1)
+          [ -z "$APK" ] && APK=$(find build/app/outputs/apk/release -name "*.apk" | head -1)
+          [ -z "$APK" ] && { echo "APK not found!"; exit 1; }
+          echo "APK: $APK ($(du -sh "$APK" | cut -f1))"
+          echo "APK_PATH=$APK" >> $GITHUB_ENV
+
+      - name: Sign APK
+        run: |
+          keytool -genkey -v -keystore sign.keystore -alias key0 \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android123 -keypass android123 \
+            -dname "CN=KenzMD,O=NexPanel,C=MY" -noprompt 2>/dev/null || true
+          BTOOL=$ANDROID_SDK_ROOT/build-tools/$(ls $ANDROID_SDK_ROOT/build-tools | sort -V | tail -1)/apksigner
+          OUTNAME="${{ env.APK_SAFE }}.apk"
+          $BTOOL sign --ks sign.keystore --ks-key-alias key0 \
+            --ks-pass pass:android123 --key-pass pass:android123 \
+            --out "$OUTNAME" "${{ env.APK_PATH }}"
+          echo "FINAL_APK=$OUTNAME" >> $GITHUB_ENV
+          echo "Signed: $OUTNAME ($(du -sh $OUTNAME | cut -f1))"
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexapp-apk-output
+          path: ${{ env.FINAL_APK }}
+          retention-days: 3
