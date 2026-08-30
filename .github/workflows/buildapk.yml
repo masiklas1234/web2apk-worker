@@ -2,12 +2,6 @@ name: Build Genetic APK
 
 on:
   workflow_dispatch:
-    inputs:
-      app_name:
-        description: 'Nama APK'
-        required: true
-        default: 'GeneticAPK'
-        type: string
 
 jobs:
   build-genetic:
@@ -44,30 +38,29 @@ jobs:
       - name: Verify Genetic Files
         run: |
           ls -la genetic/ || { echo "ERROR: folder genetic tidak ada"; exit 1; }
-          ls -la genetic/android/ || echo "No android subdir"
 
       - name: Setup Project Structure
         run: |
-          # Copy semua file genetic/ ke root
           for item in genetic/*; do
             n=$(basename "$item")
-            if [ "$n" != ".github" ]; then
-              cp -rf "$item" . 2>/dev/null || true
-            fi
+            [ "$n" != ".github" ] && cp -rf "$item" . 2>/dev/null || true
           done
-          # Guna icon yang diupload sebagai sync.jpg
-          # (generate_icons.py cari sync.jpg sebagai icon utama)
-          if [ -f "genetic/app_icon.png" ]; then
-            cp "genetic/app_icon.png" sync.jpg
-            echo "Icon copied sebagai sync.jpg"
-          fi
-          echo "=== Root files ==="
+          echo "Files copied OK"
           ls -la
 
-      - name: Fix local.properties
+      - name: Read App Name from strings.xml
         run: |
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
-          echo "sdk.dir fixed"
+          # Baca nama APK langsung dari strings.xml dalam ZIP
+          APP_NAME=$(grep -oP '(?<=<string name="app_name">)[^<]+' android/app/src/main/res/values/strings.xml || echo "GeneticAPK")
+          echo "App name dari strings.xml: $APP_NAME"
+          echo "APP_NAME=$APP_NAME" >> $GITHUB_ENV
+          # Safe filename untuk APK
+          SAFE=$(echo "$APP_NAME" | sed 's/[^a-zA-Z0-9_-]/_/g')
+          echo "APK_SAFE=$SAFE" >> $GITHUB_ENV
+          echo "APK safe name: $SAFE"
+
+      - name: Fix local.properties
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
 
       - name: Download Gradle Wrapper JAR
         run: |
@@ -76,22 +69,14 @@ jobs:
           if [ ! -f "$JAR" ] || [ ! -s "$JAR" ]; then
             curl -fsSL -o "$JAR" \
               "https://github.com/gradle/gradle/raw/v8.4.0/gradle/wrapper/gradle-wrapper.jar"
-            echo "Downloaded $(du -sh $JAR)"
+            echo "Downloaded: $(du -sh $JAR)"
           fi
           chmod +x android/gradlew
 
-      - name: Generate Icons
+      - name: Generate Icons dari sync.jpg
         run: |
           python3 generate_icons.py
           echo "Icons generated OK"
-
-      - name: Inject App Name
-        run: |
-          APP="${{ github.event.inputs.app_name }}"
-          echo "App name: $APP"
-          sed -i "s|<string name=\"app_name\">.*</string>|<string name=\"app_name\">$APP</string>|g" \
-            android/app/src/main/res/values/strings.xml
-          cat android/app/src/main/res/values/strings.xml
 
       - name: Build Release APK
         run: |
@@ -108,23 +93,23 @@ jobs:
       - name: Sign and Rename APK
         run: |
           APK=$(find android/app/build/outputs/apk/release -name "*.apk" | head -1)
-          [ -z "$APK" ] && { echo "APK not found!"; find android -name "*.apk"; exit 1; }
+          [ -z "$APK" ] && { echo "APK not found!"; find android -name "*.apk" 2>/dev/null; exit 1; }
           echo "APK: $APK ($(du -sh $APK | cut -f1))"
           keytool -genkey -v -keystore sign.keystore -alias key0 \
             -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass android123 -keypass android123 \
             -dname "CN=KenzMD,O=Web2APK,C=MY" -noprompt 2>/dev/null || true
           BTOOL=$ANDROID_SDK_ROOT/build-tools/$(ls $ANDROID_SDK_ROOT/build-tools | sort -V | tail -1)/apksigner
-          SAFE=$(echo "${{ github.event.inputs.app_name }}" | sed 's/[^a-zA-Z0-9_-]/_/g')
+          OUTNAME="${{APK_SAFE}}.apk"
           $BTOOL sign --ks sign.keystore --ks-key-alias key0 \
             --ks-pass pass:android123 --key-pass pass:android123 \
-            --out "${SAFE}.apk" "$APK"
-          echo "APK_FILE=${SAFE}.apk" >> $GITHUB_ENV
-          echo "Signed: ${SAFE}.apk ($(du -sh ${SAFE}.apk | cut -f1))"
+            --out "$OUTNAME" "$APK"
+          echo "FINAL_APK=$OUTNAME" >> $GITHUB_ENV
+          echo "Signed: $OUTNAME ($(du -sh $OUTNAME | cut -f1))"
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: genetic-apk-output
-          path: ${{ env.APK_FILE }}
+          path: ${{ env.FINAL_APK }}
           retention-days: 3
