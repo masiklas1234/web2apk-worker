@@ -2,6 +2,12 @@ name: Build Genetic APK
 
 on:
   workflow_dispatch:
+    inputs:
+      app_name:
+        description: 'Nama APK'
+        required: true
+        default: 'GeneticAPK'
+        type: string
 
 jobs:
   build-genetic:
@@ -33,41 +39,32 @@ jobs:
         run: |
           echo "=== Contents of genetic/ ==="
           ls -la genetic/ || { echo "ERROR: Folder genetic/ tidak ada!"; exit 1; }
-          echo "=== Android folder ==="
-          ls -la genetic/android/ || echo "No android folder"
 
       - name: Setup Project Structure
         run: |
-          # Copy semua dari genetic/ ke root, jaga .github tetap
           shopt -s dotglob
           for item in genetic/*; do
             name=$(basename "$item")
-            if [ "$name" != ".github" ]; then
+            if [ "$name" != ".github" ] && [ "$name" != "app_icon.png" ]; then
               cp -rf "$item" . 2>/dev/null || true
-              echo "Copied: $name"
             fi
           done
-          echo "=== Root files after copy ==="
+          echo "Project files copied OK"
           ls -la
 
       - name: Fix local.properties
         run: |
           echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
-          echo "Fixed local.properties: sdk.dir=$ANDROID_SDK_ROOT"
-        env:
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          echo "Fixed: sdk.dir=$ANDROID_SDK_ROOT"
 
       - name: Download Gradle Wrapper JAR
         run: |
           mkdir -p android/gradle/wrapper
           JAR="android/gradle/wrapper/gradle-wrapper.jar"
           if [ ! -f "$JAR" ]; then
-            echo "Downloading gradle-wrapper.jar..."
             curl -fsSL -o "$JAR" \
               "https://github.com/gradle/gradle/raw/v8.4.0/gradle/wrapper/gradle-wrapper.jar"
             echo "Downloaded: $(du -sh $JAR)"
-          else
-            echo "gradle-wrapper.jar sudah ada"
           fi
           chmod +x android/gradlew
 
@@ -75,80 +72,57 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Accept Android Licenses
-        run: |
-          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses 2>/dev/null || true
-        env:
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+        run: yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses 2>/dev/null || true
 
-      - name: Generate Icons
+      - name: Generate Icons from Uploaded Icon
         run: |
-          if [ -f "generate_icons.py" ]; then
-            python3 generate_icons.py
-            echo "Icons generated OK"
+          ICON_SRC="genetic/app_icon.png"
+          if [ -f "$ICON_SRC" ]; then
+            python3 generate_icons.py "$ICON_SRC" 2>/dev/null || python3 generate_icons.py
           else
-            echo "WARNING: generate_icons.py tidak ada, buat icon placeholder"
-            python3 -c "
-from PIL import Image
-import os
-sizes = {"mdpi":48,"hdpi":72,"xhdpi":96,"xxhdpi":144,"xxxhdpi":192}
-for d, s in sizes.items():
-    os.makedirs(f"android/app/src/main/res/mipmap-{d}", exist_ok=True)
-    img = Image.new("RGB", (s,s), (0,0,0))
-    img.save(f"android/app/src/main/res/mipmap-{d}/ic_launcher.png")
-    img.save(f"android/app/src/main/res/mipmap-{d}/ic_launcher_round.png")
-print("Placeholder icons created")
-"
+            python3 generate_icons.py
           fi
+          echo "Icons generated OK"
+
+      - name: Inject App Name into strings.xml
+        run: |
+          APP="${{ github.event.inputs.app_name }}"
+          echo "App name: $APP"
+          # Update strings.xml dengan nama APK dari input
+          sed -i "s|<string name=\"app_name\">.*</string>|<string name=\"app_name\">$APP</string>|g" \
+            android/app/src/main/res/values/strings.xml || true
+          # Juga update package name friendly
+          echo "strings.xml updated"
 
       - name: Build Release APK
         run: |
           cd android
-          ./gradlew assembleRelease \
-            --no-daemon \
-            --stacktrace \
-            --info \
+          ./gradlew assembleRelease --no-daemon --stacktrace \
             -Dorg.gradle.jvmargs="-Xmx2g -XX:MaxMetaspaceSize=512m"
         env:
           ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
           GRADLE_OPTS: "-Dorg.gradle.daemon=false"
 
-      - name: Sign & Rename APK
+      - name: Sign and Rename APK
         run: |
           APK=$(find android/app/build/outputs/apk/release -name "*.apk" | head -1)
-          if [ -z "$APK" ]; then
-            echo "ERROR: APK tidak ditemukan setelah build"
-            find android/app/build -name "*.apk" 2>/dev/null || echo "Tidak ada APK sama sekali"
-            exit 1
-          fi
-          echo "APK ditemukan: $APK ($(du -sh "$APK" | cut -f1))"
-          # Generate keystore
+          [ -z "$APK" ] && { echo "ERROR: APK tidak ditemukan"; exit 1; }
+          echo "APK: $APK ($(du -sh $APK | cut -f1))"
           keytool -genkey -v -keystore sign.keystore -alias key0 \
             -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass android123 -keypass android123 \
             -dname "CN=KenzMD,O=Web2APK,C=MY" -noprompt 2>/dev/null || true
-          # Sign APK
           BTOOL=$ANDROID_SDK_ROOT/build-tools/$(ls $ANDROID_SDK_ROOT/build-tools | sort -V | tail -1)/apksigner
+          SAFE=$(echo "${{ github.event.inputs.app_name }}" | sed 's/[^a-zA-Z0-9_-]/_/g')
           $BTOOL sign --ks sign.keystore --ks-key-alias key0 \
             --ks-pass pass:android123 --key-pass pass:android123 \
-            --out GeneticAPK.apk "$APK"
-          echo "APK signed OK: $(du -sh GeneticAPK.apk)"
+            --out "${SAFE}.apk" "$APK"
+          echo "APK_FILE=${SAFE}.apk" >> $GITHUB_ENV
+          echo "Signed: ${SAFE}.apk"
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: genetic-apk-output
-          path: GeneticAPK.apk
+          path: ${{ env.APK_FILE }}
           retention-days: 3
-
-      - name: Cleanup Genetic Folder
-        if: always()
-        run: |
-          git config user.email "bot@tanzai.dev"
-          git config user.name "TANZ AI Bot"
-          git rm -rf genetic/ 2>/dev/null || true
-          git add -A
-          git diff --cached --quiet || git commit -m "cleanup: hapus genetic setelah build"
-          git push 2>/dev/null || true
-          echo "Cleanup done"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
