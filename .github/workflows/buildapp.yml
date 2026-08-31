@@ -6,22 +6,13 @@ on:
 jobs:
   build-nexapp:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
-      - name: Setup Project Files dari nexapp/
-        run: |
-          for item in nexapp/*; do
-            n=$(basename "$item")
-            cp -rf "$item" . 2>/dev/null || true
-          done
-          echo "Files copied OK"
-          ls -la
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -30,79 +21,164 @@ jobs:
           distribution: 'temurin'
           cache: 'gradle'
 
-      - name: Setup Flutter
+      - name: Setup Flutter 3.22.0
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.22.0'
           channel: 'stable'
           cache: true
 
-      - name: Flutter pub get
-        run: flutter pub get
-
-      - name: Fix local.properties
+      - name: Setup Project Files dari nexapp/
         run: |
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
-          FLUTTER_PATH=$(which flutter | xargs dirname | xargs dirname)
-          echo "flutter.sdk=$FLUTTER_PATH" >> android/local.properties
-          cat android/local.properties
+          echo "=== Isi nexapp/ ==="
+          ls -la nexapp/ || { echo "ERROR: folder nexapp/ tidak ada!"; exit 1; }
+          for item in nexapp/*; do
+            n=$(basename "$item")
+            [ "$n" = ".github" ] && continue
+            cp -rf "$item" . 2>/dev/null || true
+            echo "  Copied: $n"
+          done
+          echo "=== Root setelah copy ==="
+          ls -la
+          [ -f pubspec.yaml ] || { echo "ERROR: pubspec.yaml tidak ada!"; exit 1; }
+          [ -d android ]      || { echo "ERROR: android/ tidak ada!"; exit 1; }
+          echo "=== Isi android/ ==="
+          ls -la android/
 
-      - name: Download Gradle Wrapper JAR
+      - name: Generate file yang tidak ada di ZIP
         run: |
+          # 1. strings.xml
+          mkdir -p android/app/src/main/res/values
+          if [ ! -f android/app/src/main/res/values/strings.xml ]; then
+            printf '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <string name="app_name">NEX PANEL</string>\n</resources>\n' > android/app/src/main/res/values/strings.xml
+            echo "OK strings.xml dibuat"
+          else
+            echo "OK strings.xml sudah ada"
+          fi
+
+          # 2. proguard-rules.pro
+          if [ ! -f android/app/proguard-rules.pro ]; then
+            cat > android/app/proguard-rules.pro << 'PGEOF'
+-keep class io.flutter.** { *; }
+-keep class io.flutter.embedding.** { *; }
+-dontwarn io.flutter.**
+-keep class io.flutter.plugins.webviewflutter.** { *; }
+-dontwarn io.flutter.plugins.webviewflutter.**
+-keep class kotlin.** { *; }
+-dontwarn kotlin.**
+-keep class com.nex.panel.** { *; }
+-keepattributes *Annotation*
+-keepattributes SourceFile,LineNumberTable
+PGEOF
+            echo "OK proguard-rules.pro dibuat"
+          else
+            echo "OK proguard-rules.pro sudah ada"
+          fi
+
+          # 3. gradlew
+          if [ ! -f android/gradlew ]; then
+            curl -fsSL -o android/gradlew "https://raw.githubusercontent.com/gradle/gradle/v8.3.0/gradlew"
+            echo "OK gradlew didownload"
+          fi
+          chmod +x android/gradlew
+
+          # 4. gradle-wrapper.jar
           mkdir -p android/gradle/wrapper
           JAR="android/gradle/wrapper/gradle-wrapper.jar"
           if [ ! -f "$JAR" ] || [ ! -s "$JAR" ]; then
             curl -fsSL -o "$JAR" "https://github.com/gradle/gradle/raw/v8.4.0/gradle/wrapper/gradle-wrapper.jar"
+            echo "OK gradle-wrapper.jar: $(du -sh $JAR | cut -f1)"
+          else
+            echo "OK gradle-wrapper.jar sudah ada"
           fi
-          chmod +x android/gradlew
 
-      - name: Read App Name
+          echo "=== File android/ setelah generate ==="
+          find android -maxdepth 4 -type f | sort
+
+      - name: Fix local.properties
         run: |
-          APP_NAME=$(grep -oP '(?<=<string name="app_name">)[^<]+' android/app/src/main/res/values/strings.xml 2>/dev/null || echo "NEX_PANEL")
-          echo "App name: $APP_NAME"
-          echo "APP_NAME=$APP_NAME" >> $GITHUB_ENV
-          SAFE=$(echo "$APP_NAME" | sed 's/[^a-zA-Z0-9_-]/_/g')
-          echo "APK_SAFE=$SAFE" >> $GITHUB_ENV
+          FLUTTER_SDK="$(dirname $(dirname $(which flutter)))"
+          {
+            echo "sdk.dir=$ANDROID_SDK_ROOT"
+            echo "flutter.sdk=$FLUTTER_SDK"
+            echo "flutter.versionCode=1"
+            echo "flutter.versionName=1.0"
+          } > android/local.properties
+          echo "=== local.properties ==="
+          cat android/local.properties
 
-      - name: Enable R8 + shrinkResources
+      - name: Accept Android Licenses & Install SDK
         run: |
-          sed -i 's/minifyEnabled false/minifyEnabled true/' android/app/build.gradle
-          sed -i 's/shrinkResources false/shrinkResources true/' android/app/build.gradle
-          grep -E "minify|shrink" android/app/build.gradle
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses 2>/dev/null || true
+          $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \
+            "build-tools;34.0.0" \
+            "platforms;android-34" \
+            "ndk;25.1.8937393" 2>/dev/null || true
 
-      - name: Build Release APK (size optimized)
+      - name: Flutter pub get
+        run: |
+          flutter pub get
+          echo "OK pub get selesai"
+
+      - name: Patch build.gradle - R8 + shrinkResources + proguard
+        run: |
+          GRADLE="android/app/build.gradle"
+          sed -i "s/minifyEnabled false/minifyEnabled true/g"    "$GRADLE"
+          sed -i "s/shrinkResources false/shrinkResources true/g" "$GRADLE"
+          if ! grep -q "proguardFiles" "$GRADLE"; then
+            sed -i '/minifyEnabled true/a\            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"' "$GRADLE"
+          fi
+          echo "=== buildTypes setelah patch ==="
+          grep -A10 "buildTypes" "$GRADLE"
+
+      - name: Build Release APK
         run: |
           flutter build apk \
             --release \
             --target-platform android-arm,android-arm64 \
             --split-per-abi \
             --obfuscate \
-            --split-debug-info=debug-info/ \
-            --no-tree-shake-icons
+            --split-debug-info=build/debug-info/ \
+            --no-tree-shake-icons \
+            --verbose
         env:
           ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx3g -Dorg.gradle.parallel=false"
 
-      - name: Pilih APK arm64
+      - name: Cari dan Verifikasi APK
         run: |
-          APK=$(find build/app/outputs/apk/release -name "*arm64*.apk" | head -1)
-          [ -z "$APK" ] && APK=$(find build/app/outputs/apk/release -name "*.apk" | head -1)
-          [ -z "$APK" ] && { echo "APK not found!"; exit 1; }
-          echo "APK: $APK ($(du -sh "$APK" | cut -f1))"
+          echo "=== Semua APK yang dihasilkan ==="
+          find . -name "*.apk" -not -path "./.git/*" 2>/dev/null
+          APK=$(find build/app/outputs/flutter-apk -name "*arm64*.apk" 2>/dev/null | head -1)
+          [ -z "$APK" ] && APK=$(find build/app/outputs/flutter-apk -name "*.apk" 2>/dev/null | head -1)
+          [ -z "$APK" ] && APK=$(find build/app/outputs/apk/release  -name "*arm64*.apk" 2>/dev/null | head -1)
+          [ -z "$APK" ] && APK=$(find build/app/outputs/apk/release  -name "*.apk" 2>/dev/null | head -1)
+          [ -z "$APK" ] && APK=$(find . -name "*.apk" -not -path "./.git/*" 2>/dev/null | head -1)
+          [ -z "$APK" ] && { echo "ERROR: APK tidak ditemukan!"; exit 1; }
+          echo "OK APK: $APK  ($(du -sh \"$APK\" | cut -f1))"
           echo "APK_PATH=$APK" >> $GITHUB_ENV
+          STRINGS="android/app/src/main/res/values/strings.xml"
+          APP_NAME=$(grep -oP '(?<=<string name="app_name">)[^<]+' "$STRINGS" 2>/dev/null | head -1 || echo "NEX_PANEL")
+          SAFE=$(echo "$APP_NAME" | sed 's/[^a-zA-Z0-9_-]/_/g' | sed 's/__*/_/g')
+          echo "APK_SAFE=$SAFE" >> $GITHUB_ENV
+          echo "App: $APP_NAME -> Safe: $SAFE"
 
       - name: Sign APK
         run: |
-          keytool -genkey -v -keystore sign.keystore -alias key0 \
+          keytool -genkey -v \
+            -keystore sign.keystore -alias key0 \
             -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass android123 -keypass android123 \
-            -dname "CN=KenzMD,O=NexPanel,C=MY" -noprompt 2>/dev/null || true
-          BTOOL=$ANDROID_SDK_ROOT/build-tools/$(ls $ANDROID_SDK_ROOT/build-tools | sort -V | tail -1)/apksigner
-          OUTNAME="${{ env.APK_SAFE }}.apk"
-          $BTOOL sign --ks sign.keystore --ks-key-alias key0 \
+            -dname "CN=KenzMD,O=NexPanel,C=MY" -noprompt 2>/dev/null
+          BUILD_VER=$(ls $ANDROID_SDK_ROOT/build-tools | sort -V | tail -1)
+          SIGNER="$ANDROID_SDK_ROOT/build-tools/$BUILD_VER/apksigner"
+          OUTNAME="${APK_SAFE}.apk"
+          $SIGNER sign \
+            --ks sign.keystore --ks-key-alias key0 \
             --ks-pass pass:android123 --key-pass pass:android123 \
-            --out "$OUTNAME" "${{ env.APK_PATH }}"
+            --out "$OUTNAME" "$APK_PATH"
           echo "FINAL_APK=$OUTNAME" >> $GITHUB_ENV
-          echo "Signed: $OUTNAME ($(du -sh $OUTNAME | cut -f1))"
+          echo "OK Signed: $OUTNAME ($(du -sh $OUTNAME | cut -f1))"
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -110,3 +186,13 @@ jobs:
           name: nexapp-apk-output
           path: ${{ env.FINAL_APK }}
           retention-days: 3
+
+      - name: Ringkasan Build
+        if: success()
+        run: |
+          echo "====================================="
+          echo " OK BUILD NEXPANEL APK BERHASIL!"
+          echo " App  : $APK_SAFE"
+          echo " File : $FINAL_APK"
+          echo " Size : $(du -sh $FINAL_APK | cut -f1)"
+          echo "====================================="
