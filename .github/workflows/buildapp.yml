@@ -6,13 +6,22 @@ on:
 jobs:
   build-nexapp:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 40
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      - name: Setup Project Files dari nexapp/
+        run: |
+          for item in nexapp/*; do
+            n=$(basename "$item")
+            cp -rf "$item" . 2>/dev/null || true
+          done
+          echo "Files copied OK"
+          ls -la
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -21,102 +30,79 @@ jobs:
           distribution: 'temurin'
           cache: 'gradle'
 
-      - name: Setup Flutter 3.22.0
+      - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.22.0'
           channel: 'stable'
           cache: true
 
-      - name: Setup Project Files dari nexapp/
-        run: |
-          echo "=== Isi nexapp/ ==="
-          ls -la nexapp/ || { echo "ERROR: folder nexapp/ tidak ada!"; exit 1; }
-          for item in nexapp/*; do
-            n=$(basename "$item")
-            [ "$n" = ".github" ] && continue
-            cp -rf "$item" . 2>/dev/null || true
-            echo "  Copied: $n"
-          done
-          echo "=== Root setelah copy ==="
-          ls -la
-          [ -f pubspec.yaml ] || { echo "ERROR: pubspec.yaml tidak ada!"; exit 1; }
-          [ -d android ]      || { echo "ERROR: android/ tidak ada!"; exit 1; }
-
-      - name: Fix local.properties
-        run: |
-          FLUTTER_SDK="$(dirname $(dirname $(which flutter)))"
-          echo "sdk.dir=$ANDROID_SDK_ROOT"   > android/local.properties
-          echo "flutter.sdk=$FLUTTER_SDK"   >> android/local.properties
-          echo "flutter.versionCode=1"      >> android/local.properties
-          echo "flutter.versionName=1.0"    >> android/local.properties
-          cat android/local.properties
-
-      - name: Fix Gradle Wrapper JAR
-        run: |
-          chmod +x android/gradlew 2>/dev/null || true
-          mkdir -p android/gradle/wrapper
-          JAR="android/gradle/wrapper/gradle-wrapper.jar"
-          if [ ! -f "$JAR" ] || [ ! -s "$JAR" ]; then
-            curl -fsSL -o "$JAR"               "https://github.com/gradle/gradle/raw/v8.4.0/gradle/wrapper/gradle-wrapper.jar"
-            echo "Downloaded: $(du -sh $JAR)"
-          fi
-
-      - name: Accept Android Licenses & Install SDK
-        run: |
-          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses 2>/dev/null || true
-          $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager             "build-tools;34.0.0" "platforms;android-34" 2>/dev/null || true
-
       - name: Flutter pub get
         run: flutter pub get
 
+      - name: Fix local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+          FLUTTER_PATH=$(which flutter | xargs dirname | xargs dirname)
+          echo "flutter.sdk=$FLUTTER_PATH" >> android/local.properties
+          cat android/local.properties
+
+      - name: Download Gradle Wrapper JAR
+        run: |
+          mkdir -p android/gradle/wrapper
+          JAR="android/gradle/wrapper/gradle-wrapper.jar"
+          if [ ! -f "$JAR" ] || [ ! -s "$JAR" ]; then
+            curl -fsSL -o "$JAR" "https://github.com/gradle/gradle/raw/v8.4.0/gradle/wrapper/gradle-wrapper.jar"
+          fi
+          chmod +x android/gradlew
+
       - name: Read App Name
         run: |
-          STRINGS="android/app/src/main/res/values/strings.xml"
-          APP_NAME=""
-          [ -f "$STRINGS" ] && APP_NAME=$(grep -oP '(?<=<string name="app_name">)[^<]+' "$STRINGS" | head -1 || true)
-          [ -z "$APP_NAME" ] && APP_NAME=$(grep '^name:' pubspec.yaml | head -1 | sed 's/name: *//' | tr -d '[:space:]')
-          [ -z "$APP_NAME" ] && APP_NAME="NEX_PANEL"
-          SAFE=$(echo "$APP_NAME" | sed 's/[^a-zA-Z0-9_-]/_/g' | sed 's/__*/_/g')
+          APP_NAME=$(grep -oP '(?<=<string name="app_name">)[^<]+' android/app/src/main/res/values/strings.xml 2>/dev/null || echo "NEX_PANEL")
+          echo "App name: $APP_NAME"
+          echo "APP_NAME=$APP_NAME" >> $GITHUB_ENV
+          SAFE=$(echo "$APP_NAME" | sed 's/[^a-zA-Z0-9_-]/_/g')
           echo "APK_SAFE=$SAFE" >> $GITHUB_ENV
-          echo "App: $APP_NAME  Safe: $SAFE"
 
-      - name: Patch build.gradle — R8 + shrinkResources
+      - name: Enable R8 + shrinkResources
         run: |
-          GRADLE="android/app/build.gradle"
-          sed -i 's/minifyEnabled false/minifyEnabled true/g'     "$GRADLE"
-          sed -i 's/shrinkResources false/shrinkResources true/g'  "$GRADLE"
-          grep -A6 "buildTypes" "$GRADLE"
+          sed -i 's/minifyEnabled false/minifyEnabled true/' android/app/build.gradle
+          sed -i 's/shrinkResources false/shrinkResources true/' android/app/build.gradle
+          grep -E "minify|shrink" android/app/build.gradle
 
-      - name: Build Release APK
+      - name: Build Release APK (size optimized)
         run: |
-          flutter build apk             --release             --target-platform android-arm,android-arm64             --split-per-abi             --obfuscate             --split-debug-info=build/debug-info/             --no-tree-shake-icons             --verbose
+          flutter build apk \
+            --release \
+            --target-platform android-arm,android-arm64 \
+            --split-per-abi \
+            --obfuscate \
+            --split-debug-info=debug-info/ \
+            --no-tree-shake-icons
         env:
           ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
-          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx3g"
 
-      - name: Cari & Verifikasi APK
+      - name: Pilih APK arm64
         run: |
-          echo "=== Semua APK ==="
-          find . -name "*.apk" -not -path "./.git/*" 2>/dev/null
-          APK=$(find build/app/outputs/flutter-apk -name "*arm64*.apk" 2>/dev/null | head -1)
-          [ -z "$APK" ] && APK=$(find build/app/outputs/flutter-apk -name "*.apk" 2>/dev/null | head -1)
-          [ -z "$APK" ] && APK=$(find build/app/outputs/apk/release  -name "*arm64*.apk" 2>/dev/null | head -1)
-          [ -z "$APK" ] && APK=$(find build/app/outputs/apk/release  -name "*.apk" 2>/dev/null | head -1)
-          [ -z "$APK" ] && APK=$(find . -name "*.apk" -not -path "./.git/*" 2>/dev/null | head -1)
-          [ -z "$APK" ] && { echo "ERROR: APK tidak ditemukan!"; exit 1; }
-          echo "APK: $APK  ($(du -sh "$APK" | cut -f1))"
+          APK=$(find build/app/outputs/apk/release -name "*arm64*.apk" | head -1)
+          [ -z "$APK" ] && APK=$(find build/app/outputs/apk/release -name "*.apk" | head -1)
+          [ -z "$APK" ] && { echo "APK not found!"; exit 1; }
+          echo "APK: $APK ($(du -sh "$APK" | cut -f1))"
           echo "APK_PATH=$APK" >> $GITHUB_ENV
 
       - name: Sign APK
         run: |
-          keytool -genkey -v             -keystore sign.keystore -alias key0             -keyalg RSA -keysize 2048 -validity 10000             -storepass android123 -keypass android123             -dname "CN=KenzMD,O=NexPanel,C=MY" -noprompt 2>/dev/null || true
-          BUILD_VER=$(ls $ANDROID_SDK_ROOT/build-tools | sort -V | tail -1)
-          SIGNER="$ANDROID_SDK_ROOT/build-tools/$BUILD_VER/apksigner"
+          keytool -genkey -v -keystore sign.keystore -alias key0 \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android123 -keypass android123 \
+            -dname "CN=KenzMD,O=NexPanel,C=MY" -noprompt 2>/dev/null || true
+          BTOOL=$ANDROID_SDK_ROOT/build-tools/$(ls $ANDROID_SDK_ROOT/build-tools | sort -V | tail -1)/apksigner
           OUTNAME="${{ env.APK_SAFE }}.apk"
-          $SIGNER sign             --ks sign.keystore --ks-key-alias key0             --ks-pass pass:android123 --key-pass pass:android123             --out "$OUTNAME" "${{ env.APK_PATH }}"
+          $BTOOL sign --ks sign.keystore --ks-key-alias key0 \
+            --ks-pass pass:android123 --key-pass pass:android123 \
+            --out "$OUTNAME" "${{ env.APK_PATH }}"
           echo "FINAL_APK=$OUTNAME" >> $GITHUB_ENV
-          echo "Signed: $OUTNAME  ($(du -sh $OUTNAME | cut -f1))"
+          echo "Signed: $OUTNAME ($(du -sh $OUTNAME | cut -f1))"
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -124,13 +110,3 @@ jobs:
           name: nexapp-apk-output
           path: ${{ env.FINAL_APK }}
           retention-days: 3
-
-      - name: Ringkasan
-        if: success()
-        run: |
-          echo "====================================="
-          echo " BUILD NEXPANEL APK BERHASIL!"
-          echo " App  : ${{ env.APK_SAFE }}"
-          echo " File : ${{ env.FINAL_APK }}"
-          echo " Size : $(du -sh ${{ env.FINAL_APK }} | cut -f1)"
-          echo "====================================="
